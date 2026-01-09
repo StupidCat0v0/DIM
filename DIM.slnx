@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="DIM/DIM.vcxproj" />
+  <Project Path="DIM/DIM.vcxproj" Id="8c7b80e6-1a63-426d-a648-a563c99aaaad" />
 </Solution>
