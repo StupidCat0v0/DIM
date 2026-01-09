@@ -58,34 +58,34 @@ std::wstring GetExecutablePath() {
 }
 
 bool RestartExplorer() {
-	//// 查找并终止explorer.exe进程
-	//PROCESSENTRY32 pe32;
-	//pe32.dwSize = sizeof(PROCESSENTRY32);
-	//HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
-	//
-	//if (hSnapshot == INVALID_HANDLE_VALUE) {
-	//	return false;
-	//}
-	//
-	//bool explorerFound = false;
-	//if (Process32First(hSnapshot, &pe32)) {
-	//	do {
-	//		if (wcscmp(pe32.szExeFile, L"explorer.exe") == 0) {
-	//			HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
-	//			if (hProcess != NULL) {
-	//				TerminateProcess(hProcess, 0);
-	//				CloseHandle(hProcess);
-	//				explorerFound = true;
-	//			}
-	//		}
-	//	} while (Process32Next(hSnapshot, &pe32));
-	//}
-	//CloseHandle(hSnapshot);
+	// 查找并终止explorer.exe进程
+	PROCESSENTRY32 pe32;
+	pe32.dwSize = sizeof(PROCESSENTRY32);
+	HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+
+	if (hSnapshot == INVALID_HANDLE_VALUE) {
+		return false;
+	}
+
+	bool explorerFound = false;
+	if (Process32First(hSnapshot, &pe32)) {
+		do {
+			if (wcscmp(pe32.szExeFile, L"explorer.exe") == 0) {
+				HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
+				if (hProcess != NULL) {
+					TerminateProcess(hProcess, 0);
+					CloseHandle(hProcess);
+					explorerFound = true;
+				}
+			}
+		} while (Process32Next(hSnapshot, &pe32));
+	}
+	CloseHandle(hSnapshot);
 
 
 	// 获取当前程序路径，用于重启
 	std::wstring currentExePath = GetExecutablePath();
-
+	Sleep(3000);
 	// 重启当前程序
 	ShellExecuteW(NULL, L"open", currentExePath.c_str(), NULL, NULL, SW_SHOWNORMAL);
 
@@ -121,7 +121,9 @@ bool SetAutoStart(bool enable) {
 	if (result == ERROR_SUCCESS) {
 		if (enable) {
 			// 获取当前程序路径
-			WCHAR exePath[MAX_PATH] = GetExecutablePath();
+			std::wstring exePathStr = GetExecutablePath();
+			WCHAR exePath[MAX_PATH];
+			wcscpy_s(exePath, MAX_PATH, exePathStr.c_str());
 
 			result = RegSetValueEx(hKey, L"DesktopIconManagement", 0, REG_SZ,
 				(BYTE*)exePath, (wcslen(exePath) + 1) * sizeof(WCHAR));
