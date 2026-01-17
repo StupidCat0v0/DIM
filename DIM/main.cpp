@@ -25,9 +25,6 @@
 #define ID_TRAY_AUTO_START 1005      // 开机自启动菜单项ID
 #define ID_TRAY_RESTART_EXPLORER 1006 // 重启资源管理器菜单项ID
 
-// CD时间常量（毫秒）
-const DWORD CD_INTERVAL = 500;      // 3秒冷却时间
-
 // 全局变量
 HINSTANCE g_hInstance = NULL;
 HWND g_hWnd = NULL;
@@ -38,8 +35,6 @@ std::mutex g_mtxClick;               // 点击检测互斥锁
 int g_nClickCount = 0;               // 点击计数
 DWORD g_dwLastClickTime = 0;         // 上一次点击时间
 const DWORD TRIPLE_CLICK_INTERVAL = 300; // 三击检测间隔
-DWORD g_dwLastOperationTime = 0;     // 上一次执行隐藏/显示操作的时间
-std::mutex g_mtxCD;                 // CD时间互斥锁
 bool g_bAutoStart = false;          // 开机自启动状态
 
 // 用于管理自动隐藏线程的变量
@@ -155,24 +150,8 @@ HWND GetDesktopListView() {
 	return NULL;
 }
 
-// 检查是否在CD冷却期内
-bool IsInCDInterval() {
-	std::lock_guard<std::mutex> lock(g_mtxCD);
-	DWORD dwCurrentTime = GetTickCount();
-	return (dwCurrentTime - g_dwLastOperationTime) < CD_INTERVAL;
-}
-
-// 更新最后操作时间（仅在真正执行操作时调用）
-void UpdateLastOperationTime() {
-	std::lock_guard<std::mutex> lock(g_mtxCD);
-	g_dwLastOperationTime = GetTickCount();
-}
-
 // 隐藏桌面图标
 void FadeOutDesktopIcons() {
-	// 检查CD冷却
-	if (IsInCDInterval()) return;
-
 	HWND desktopListView = GetDesktopListView();
 	if (!desktopListView) return;
 
@@ -185,16 +164,10 @@ void FadeOutDesktopIcons() {
 
 	// 取消任何正在运行的自动隐藏线程
 	g_bCancelAutoHide = true;
-
-	// 只有真正执行了隐藏操作才更新时间
-	UpdateLastOperationTime();
 }
 
 // 恢复桌面图标
 void RestoreDesktopIcons() {
-	// 检查CD冷却
-	if (IsInCDInterval()) return;
-
 	HWND desktopListView = GetDesktopListView();
 	if (desktopListView) {
 		ShowWindow(desktopListView, SW_SHOW);
@@ -202,9 +175,6 @@ void RestoreDesktopIcons() {
 
 		// 取消任何正在运行的自动隐藏线程
 		g_bCancelAutoHide = true;
-
-		// 只有真正执行了恢复操作才更新时间
-		UpdateLastOperationTime();
 
 		// 创建线程，等待1分钟后自动隐藏图标
 		// 首先检查是否已经有自动隐藏线程在运行，如果有则取消它
@@ -231,10 +201,8 @@ void RestoreDesktopIcons() {
 				return; // 线程被取消，直接退出
 			}
 
-			// 检查是否仍在CD期内，如果不在则执行隐藏
-			if (!IsInCDInterval()) {
-				FadeOutDesktopIcons();
-			}
+			// 执行隐藏
+			FadeOutDesktopIcons();
 
 			g_bAutoHideThreadActive = false; // 重置线程活动标志
 			}).detach(); // 分离线程，自动回收资源
@@ -258,11 +226,6 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
 
 		// 检测桌面区域的左键三击
 		if (wParam == WM_LBUTTONDOWN) {
-			// 如果在CD期内，直接返回
-			if (IsInCDInterval()) {
-				return CallNextHookEx(g_hMouseHook, nCode, wParam, lParam);
-			}
-
 			HWND hForegroundWnd = GetForegroundWindow();
 			std::string className = GetWindowClassName(hForegroundWnd);
 
@@ -323,8 +286,8 @@ void CreateTrayIcon() {
 	g_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
 	g_nid.uCallbackMessage = WM_TRAYICON;
 
-	// 设置托盘提示文本（添加CD提示）
-	wcscpy_s(g_nid.szTip, L"桌面图标隐藏工具\n三击桌面切换显示/隐藏\n操作后有3秒冷却时间");
+	// 设置托盘提示文本
+	wcscpy_s(g_nid.szTip, L"桌面图标隐藏工具\n三击桌面切换显示/隐藏");
 
 	// 使用默认应用程序图标
 	g_nid.hIcon = LoadIcon(NULL, IDI_APPLICATION);
@@ -349,15 +312,10 @@ void ShowTrayMenu() {
 
 	HMENU hMenu = CreatePopupMenu();
 
-	// 添加菜单项（根据CD状态灰显）
+	// 添加菜单项
 	UINT restoreFlags = MF_STRING;
 	UINT hideFlags = MF_STRING;
 	UINT autoStartFlags = MF_STRING;
-
-	if (IsInCDInterval()) {
-		restoreFlags |= MF_GRAYED;
-		hideFlags |= MF_GRAYED;
-	}
 
 	if (g_bIconHidden) {
 		AppendMenu(hMenu, restoreFlags, ID_TRAY_RESTORE, L"恢复桌面图标");
@@ -401,9 +359,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			ShowTrayMenu();
 		}
 		else if (lParam == WM_LBUTTONDBLCLK) {
-			// 左键双击托盘图标，切换图标状态（先检查CD）
-			if (IsInCDInterval()) break;
-
+			// 左键双击托盘图标，切换图标状态
 			if (g_bIconHidden) {
 				RestoreDesktopIcons();
 			}
@@ -421,16 +377,12 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) {
 			PostQuitMessage(0);
 			break;
 		case ID_TRAY_RESTORE:
-			// 恢复桌面图标（检查CD）
-			if (!IsInCDInterval()) {
-				RestoreDesktopIcons();
-			}
+			// 恢复桌面图标
+			RestoreDesktopIcons();
 			break;
 		case ID_TRAY_HIDE:
-			// 隐藏桌面图标（检查CD）
-			if (!IsInCDInterval()) {
-				FadeOutDesktopIcons();
-			}
+			// 隐藏桌面图标
+			FadeOutDesktopIcons();
 			break;
 		case ID_TRAY_AUTO_START:
 			// 切换开机自启动
