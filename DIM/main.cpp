@@ -14,7 +14,6 @@
 #include <tlhelp32.h>
 
 #pragma comment(lib, "comctl32.lib")
-#pragma comment(linker, "/SUBSYSTEM:WINDOWS /ENTRY:WinMainCRTStartup")
 
 // 全局常量定义
 #define WM_TRAYICON (WM_USER + 1)    // 托盘图标消息
@@ -34,12 +33,13 @@ bool g_bIconHidden = true;          // 图标是否已隐藏
 std::mutex g_mtxClick;               // 点击检测互斥锁
 int g_nClickCount = 0;               // 点击计数
 DWORD g_dwLastClickTime = 0;         // 上一次点击时间
-const DWORD TRIPLE_CLICK_INTERVAL = 300; // 三击检测间隔
+const DWORD TRIPLE_CLICK_INTERVAL = 600; // 三击检测间隔
 bool g_bAutoStart = false;          // 开机自启动状态
 
 // 用于管理自动隐藏线程的变量
 std::atomic<bool> g_bAutoHideThreadActive{ false };  // 是否有自动隐藏线程在运行
 std::atomic<bool> g_bCancelAutoHide{ false };        // 是否取消自动隐藏
+std::atomic<DWORD> g_LastClickProgman{ GetTickCount() }; // 记录最后一次鼠标活动时间
 
 // 重启资源管理器函数
 void CreateTrayIcon();
@@ -176,7 +176,7 @@ void RestoreDesktopIcons() {
 		// 取消任何正在运行的自动隐藏线程
 		g_bCancelAutoHide = true;
 
-		// 创建线程，等待1分钟后自动隐藏图标
+		// 创建线程，等待50秒后检测10秒内是否有鼠标活动，有则再等50秒
 		// 首先检查是否已经有自动隐藏线程在运行，如果有则取消它
 		if (g_bAutoHideThreadActive.load()) {
 			g_bCancelAutoHide = true;
@@ -187,22 +187,49 @@ void RestoreDesktopIcons() {
 		g_bAutoHideThreadActive = true;
 
 		std::thread([]() {
-			// 等待1分钟
-			auto start_time = std::chrono::steady_clock::now();
-			auto end_time = start_time + std::chrono::minutes(1);
+			while (!g_bCancelAutoHide.load()) {
+				// 等待50秒
+				auto start_time = std::chrono::steady_clock::now();
+				auto end_time = start_time + std::chrono::seconds(50);
 
-			while (std::chrono::steady_clock::now() < end_time && !g_bCancelAutoHide.load()) {
-				std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms检查一次
+				while (std::chrono::steady_clock::now() < end_time && !g_bCancelAutoHide.load()) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms检查一次
+				}
+
+				// 检查是否被取消
+				if (g_bCancelAutoHide.load()) {
+					g_bAutoHideThreadActive = false;
+					return; // 线程被取消，直接退出
+				}
+
+				// 记录当前时间作为检测开始时间
+				DWORD detectionStartTime = GetTickCount();
+
+				// 检测接下来10秒内是否有鼠标活动
+				auto detection_start = std::chrono::steady_clock::now();
+				auto detection_end = detection_start + std::chrono::seconds(10);
+
+				bool activityDetected = false;
+				while (std::chrono::steady_clock::now() < detection_end && !g_bCancelAutoHide.load()) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(100)); // 每100ms检查一次
+
+					// 检查最后活动时间是否在检测期间内更新
+					DWORD lastActivity = g_LastClickProgman.load();
+					if (lastActivity > detectionStartTime) {
+						activityDetected = true;
+						break;
+					}
+				}
+
+				// 如果检测到活动，则继续循环等待下一个50秒周期
+				if (activityDetected) {
+					continue;
+				}
+
+				// 如果没有检测到活动，则执行隐藏
+				FadeOutDesktopIcons();
+				break; // 完成隐藏后退出循环
 			}
-
-			// 检查是否被取消
-			if (g_bCancelAutoHide.load()) {
-				g_bAutoHideThreadActive = false;
-				return; // 线程被取消，直接退出
-			}
-
-			// 执行隐藏
-			FadeOutDesktopIcons();
 
 			g_bAutoHideThreadActive = false; // 重置线程活动标志
 			}).detach(); // 分离线程，自动回收资源
@@ -221,24 +248,25 @@ std::string GetWindowClassName(HWND hWnd) {
 }
 // 鼠标钩子处理函数
 LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
-	if (nCode >= 0) {
+	if (nCode >= 0) {//有反应
 		MSLLHOOKSTRUCT* pMouseStruct = (MSLLHOOKSTRUCT*)lParam;
 
-		// 检测桌面区域的左键三击
 		if (wParam == WM_LBUTTONDOWN) {
 			HWND hForegroundWnd = GetForegroundWindow();
 			std::string className = GetWindowClassName(hForegroundWnd);
 
-			// 检测是否点击在桌面区域
-			if (className == "Progman" || className == "WorkerW") {
-				std::lock_guard<std::mutex> lock(g_mtxClick);
-				DWORD dwCurrentTime = GetTickCount();
+			if (className == "Progman" || className == "WorkerW")
+				g_LastClickProgman = GetTickCount();
+			DWORD dwCurrentTime = GetTickCount();
 
-				// 三击检测逻辑
-				if (dwCurrentTime - g_dwLastClickTime <= TRIPLE_CLICK_INTERVAL) {
-					g_nClickCount++;
-					if (g_nClickCount >= 3) {
-						// 切换图标显示状态
+			g_nClickCount++;
+			if (dwCurrentTime - g_dwLastClickTime > TRIPLE_CLICK_INTERVAL)
+				g_nClickCount = 1; // 超过时间间隔，重置计数
+			else {
+				if (className == "Progman" || className == "WorkerW")
+				{
+					// 更新最后活动时间
+					if (g_nClickCount == 3) {
 						if (g_bIconHidden) {
 							RestoreDesktopIcons();
 						}
@@ -248,11 +276,8 @@ LRESULT CALLBACK MouseHookProc(int nCode, WPARAM wParam, LPARAM lParam) {
 						g_nClickCount = 0; // 重置计数
 					}
 				}
-				else {
-					g_nClickCount = 1; // 超过间隔，重置为第一次点击
-				}
-				g_dwLastClickTime = dwCurrentTime;
 			}
+			g_dwLastClickTime = dwCurrentTime;
 		}
 	}
 
@@ -471,8 +496,6 @@ bool TerminateExistingProcess(const wchar_t* processName) {
 				HANDLE hProcess = OpenProcess(PROCESS_TERMINATE, FALSE, pe32.th32ProcessID);
 				if (hProcess != NULL) {
 					if (TerminateProcess(hProcess, 0)) {
-						std::wcout << L"已终止进程: " << processName
-							<< L" (PID: " << pe32.th32ProcessID << L")\n";
 						foundAndTerminated = true;
 					}
 					CloseHandle(hProcess);
@@ -488,7 +511,7 @@ bool TerminateExistingProcess(const wchar_t* processName) {
 // WinMain入口函数
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, LPSTR lpCmdLine, int nCmdShow) {
 	// 检查是否已运行
-	if (TerminateExistingProcess(L"DesktopIconManagement")) {
+	if (TerminateExistingProcess(L"DesktopIconManagement.exe")) {
 		MessageBox(NULL, L"程序已在运行中！", L"提示", MB_ICONINFORMATION | MB_OK);
 		return 1;
 	}
